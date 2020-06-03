@@ -1,0 +1,203 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+library(GEOquery)
+library(beadarray)
+library(lumi)
+library(arrayQualityMetrics)
+library(ggplot2)
+library(limma)
+library(reshape2)
+library(illuminaMousev2.db)
+
+
+setwd("/mnt/data8/zhaoyuancun/microarray")
+```
+
+```{r}
+#Start from non-normalized matrix
+
+#The help page for 'neqc' says: "When expression values for negative controls are not available,
+#the detection.p argument is used instead."
+# EListRaw holds expression values on the raw scale, the expression values are unlogged.
+# non_norm <- read.delim("GSE93631_non-normalized.txt",sep="\t",row.names=1)
+# non_norm <- read.ilmn( files = "GSE93631_non-normalized.txt", probeid = "Probe_Id", expr = "87" )
+# 
+# proportion <- propexpr(non_norm)
+# proportion
+# 
+# j <- 2*(1:(ncol(non_norm)/2))
+# x <- new("EListRaw")
+# x$E <- as.matrix(non_norm[,j-1])
+# x$Detection <- as.matrix(non_norm[,j])
+# y <- neqc(x, offset=16, detection.p=x$Detection)
+# exprDat <- x$E
+# ggplot(data=melt(exprDat), aes(x = Var2, y = value)) + 
+#   geom_violin() + 
+#   theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+BSData = readBeadSummaryData(dataFile = "GSE93631_non-normalized.txt", skip = 0, ProbeID = "Probe_Id", columns = list(exprs = "^8", Detection = "Detection Pval"), illuminaAnnotation = "Mousev2")
+
+# if(all(pData[,"description.1"] == paste("87", colnames(exprs(BSData)), sep = ""))){
+#   colnames(assayData(BSData)$exprs) <- rownames(pData)
+#   colnames(assayData(BSData)$Detection) <- rownames(pData)
+# }
+
+BSData <- addFeatureData(BSData, toAdd = c("SYMBOL", "PROBEQUALITY", "CODINGZONE", "PROBESEQUENCE"))
+
+fData(BSData)$Status <-
+         ifelse(fData(BSData)$PROBEQUALITY=="No match","negative","regular" )
+
+
+exprDat <- exprs(BSData)
+ggplot(data=melt(exprDat), aes(x = Var2, y = value)) + 
+  geom_violin() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Original Intensity") +
+  xlab("Sample") +
+  ylab("Original Intensity")
+
+# exprDat <- log2(exprs(BSData))
+# ggplot(data=melt(exprDat), aes(x = Var2, y = value)) + 
+#   geom_violin() + 
+#   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+#   ggtitle("Regular probes") +
+#   xlab("Sample")+
+#   ylab("log[2](intensity)")
+
+exprDat <- log2(exprs(BSData)[fData(BSData)$Status == "regular", ])
+ggplot(data=melt(exprDat), aes(x = Var2, y = value)) + 
+  geom_violin() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Regular probes") +
+  xlab("Sample")+
+  ylab("log[2](intensity)")
+
+exprDat <- log2(exprs(BSData)[fData(BSData)$Status == "negative", ])
+ggplot(data=melt(exprDat), aes(x = Var2, y = value)) + 
+  geom_violin() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Negative probes") +
+  xlab("Sample")+
+  ylab("log[2](intensity)")
+
+BSData.neqc <- normaliseIllumina(BSData, method="neqc", transform="none")
+exprDat <- exprs(BSData.neqc)[fData(BSData.neqc)$Status == "regular", ]
+ggplot(data=melt(exprDat), aes(x = Var2, y = value)) + 
+  geom_violin() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Regular probes, NEQC normalized") +
+  xlab("Sample")+
+  ylab("log[2](intensity)")
+# beadarray的readBeadSummaryData()与read.delim()效果一致，但可以做更多操作，并且可以生成ExpressionSetIllumina（Expression Set的一种）
+
+```
+
+
+```{r}
+ids <- as.character(featureNames(BSData.neqc))
+qual <- unlist(mget(ids, illuminaMousev2PROBEQUALITY, ifnotfound=NA))
+rem <- qual == "No match" | qual == "Bad" | is.na(qual)
+BSData.filt <- BSData.neqc[!rem,]
+dim(BSData.filt)
+
+```
+
+
+
+
+
+```{r}
+#Start from series_matrix (which is normalized)
+#----------0.Using GEOquery for series_matrix downloading and platform annotation---------------
+# gset <- getGEO("GSE93631", GSEMatrix =TRUE, AnnotGPL=TRUE )
+# gpl6887 <- getGEO('GPL6887')
+
+gset <- getGEO("GSE93631", GSEMatrix =TRUE, AnnotGPL=TRUE )
+head(exprs(gset[[1]]))
+
+#----------1.Extractiong expression set and phenotype---------------
+pData <- pData(gset[[1]])
+
+#----------Using beadarray package to convert to ExpressionSetIllumina object---------------
+summaryData <- as(gset[[1]], "ExpressionSetIllumina")
+fData(summaryData)$Status <-
+         ifelse(fData(summaryData)$PROBEQUALITY=="No match","negative","regular" )
+
+Detection(summaryData) <- calculateDetection(summaryData,
+                                             status=fData(summaryData)$Status)
+
+# summaryData.norm <- normaliseIllumina(summaryData, method="quantile",
+#     status=fData(summaryData)$Status)
+# GEO series_matrix 似乎已经做过Relative Log Expression，是否需要neqc有待商榷
+
+
+
+# boxplot(summaryData.norm) + coord_cartesian(ylim = c(-2,2))
+  # + coord_cartesian(ylim = c(4,4.05))
+
+#----------Pick 1000 features randomly for Relative Log Expression data quality analysis----------
+randIDs <- sample(featureNames(summaryData), 1000)
+boxplot(summaryData[randIDs,]) + coord_cartesian(ylim = c(-2,2))
+```
+
+
+```{R}
+mas <- plotMA(summaryData)
+
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{R}
+sample <- pData$geo_accession
+
+inf_day <- pData[,"day:ch1"]
+
+inf_type <- pData[,"infection:ch1"]
+
+design_df <- data.frame(sample, inf_day, inf_type)
+
+TS <- paste(design_df$inf_day, design_df$inf_type, sep=".")
+TS
+TS <- factor(TS, levels = unique(TS))
+design <- model.matrix(~0+TS)
+fit <- lmFit(exprSet, design)
+View(fit)
+
+cont.matrix <- makeContrasts(
+  vs1  = TSday 0.naive-TS2.vehicle_control,
+  vs2  = TS18.PE2.0_embolized-TS2.PE2.0_embolized, 
+  vs3  = TS18.PE1.3_embolized-TS2.PE1.3_embolized, 
+  diff = (TS18.PE2.0_embolized-TS18.vehicle_control)-(TS18.PE1.3_embolized-TS18.vehicle_control),
+  levels = design
+)
+
+fit2 <- contrasts.fit(fit, cont.matrix)
+results <- decideTests(fit2)
+```
+
+
+
+
+
+
+
+

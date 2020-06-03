@@ -1,0 +1,387 @@
+---
+title: "Rscript_for_BeadArray"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+library(lumi)
+library(lumiMouseIDMapping)
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+library(pheatmap)
+library(clusterProfiler)
+library(enrichplot)
+require("knitr")
+
+knitr::opts_chunk$set(echo = TRUE)
+opts_knit$set(root.dir = "/mnt/data8/zhaoyuancun/microarray")
+```
+
+
+```{r}
+
+###########################################################
+# Function for log2 variance stabilizing transform (VST), #
+#    quantile between microarray normaliazation (N),      #
+# and quality control (Q) estimation after normalization  #
+###########################################################
+
+subTNQ <- function(SubSet) {
+  
+  Obj_T <- lumiT(SubSet, method = 'log2')
+
+  Obj_TN <- lumiN(Obj_T)
+
+  Obj_TNQ <- lumiQ(Obj_TN)
+  
+  return(Obj_TNQ)
+}
+
+###############################################################
+# Function for boxplot of the normalized microarray intensity #
+###############################################################
+
+IntBoxplot <- function(SubSet, tissue, strain, printPDF = F){ 
+  randIDs <- sample(featureNames(SubSet), 3000)
+  if(printPDF == T){
+    pdf(file = paste("fig/Boxplot_of_", strain, "_", tissue, "_intensity.pdf") )
+  }
+  p <- ggplot( melt(exprs(SubSet[randIDs,])) , aes(x = Var2, y = value) ) +
+    stat_boxplot(geom = "errorbar", width = 0.3) +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank()) +
+    geom_boxplot(outlier.shape = 1, outlier.size = 0.1, alpha = 1/3) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1) ) +
+    scale_x_discrete(labels = paste(SubSet$infection,
+                                    SubSet$day) ) +
+    ggtitle( paste("Boxplot of ", tissue, " ", strain, " intensity") )+
+    xlab("Sample") +
+    ylab("log2 transformed intensity (Rnd sampled 3000)")
+  print(p)
+  if(printPDF == T){
+    dev.off()
+  }
+}
+
+###########################################################
+# Function for PCA plot of the normalized expression data #
+###########################################################
+
+customPCA <- function(Obj_TNQ, tissue, strain, printPDF = F) {
+  
+  exp_raw <- exprs(Obj_TNQ)
+  PCA_raw <- prcomp(t(exp_raw), scale. = FALSE)
+  
+  percentVar <- round(100*PCA_raw$sdev^2/sum(PCA_raw$sdev^2),1)
+  sd_ratio <- sqrt(percentVar[2] / percentVar[1])
+  
+  dataGG <- data.frame(PC1 = PCA_raw$x[,1], PC2 = PCA_raw$x[,2],
+                       infection = pData(Obj_TNQ)$"infection",
+                       day = pData(Obj_TNQ)$"day")
+  if(printPDF == T){
+    pdf(file = "fig/PCA_plot_of_", strain, "_", tissue, ".pdf")
+  }
+  p <- ggplot(dataGG, aes(PC1, PC2)) +
+    geom_point(aes(shape = infection, colour = day), size = 3) +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank()) +
+    ggtitle( paste("PCA plot of ", tissue, " ", strain) ) +
+    xlab(paste0("PC1, VarExp: ", percentVar[1], "%")) +
+    ylab(paste0("PC2, VarExp: ", percentVar[2], "%")) +
+    theme(plot.title = element_text(hjust = 0.5), aspect.ratio=1)+
+    coord_fixed(ratio = sd_ratio) +
+    scale_shape_manual(values = c(17,15)) + 
+    if( strain == "AS" ){ 
+      scale_color_manual(values = c("#1f78b4", "#33a02c", "#e31a1c", "#ff7f00",
+                                    "#6a3d9a", "#ffff99", "#b15928"))
+    } else {
+      scale_color_manual(values = c("#1f78b4", "#33a02c", "#e31a1c", "#ff7f00",
+                                    "#6a3d9a", "#ffff99", "#b15928", "#999999"))
+    }
+  print(p)
+  if(printPDF == T){
+    dev.off()
+  }
+}
+
+#######################################################################################
+# Function for heatmap clusterring of the vst-transformed raw expression data of PcCB #
+#######################################################################################
+
+customHeatmap <- function(Obj_TNQ, tissue, strain, printPDF = F) {
+  
+  annotation_for_heatmap <- data.frame(infection = pData(Obj_TNQ)$"infection", day = pData(Obj_TNQ)$"day")
+  
+  row.names(annotation_for_heatmap) <- row.names(pData(Obj_TNQ))
+  
+  dists <- as.matrix(dist(t(exprs(Obj_TNQ)), method = "euclidean"))
+  
+  rownames(dists) <- row.names(pData(Obj_TNQ))
+  hmcol <- rev(colorRampPalette(RColorBrewer::brewer.pal(9, "YlOrRd"))(255))
+  colnames(dists) <- NULL
+  diag(dists) <- NA
+  
+  if(printPDF == T){
+    pdf(file = paste( "fig/Heatmap_of_", strain, "_", tissue, ".pdf") )
+  }
+  p <- pheatmap(dists, col = (hmcol),
+                cellwidth = 10,
+                cellheight = 10,
+                labels_row = paste(Obj_TNQ$infection, Obj_TNQ$day),
+                legend = TRUE, 
+                treeheight_col = 0,
+                main = paste("Heatmap for vst-transformed ", tissue, strain) )
+  print(p)
+  if(printPDF == T){
+    dev.off()
+  }
+}
+
+```
+
+
+
+```{r}
+
+# Raw data reading
+
+fileList <- c("HJ_CG_JeanLangh_JW_220813_Sample_Probe_Profile.txt",
+              "HJ_JLanghorne_NoURNA_bkgsubt_NoNorm_110913_Sample_Probe_Profile.txt",
+              "HJ_JWL_181213_NouRNA_Bkg_subt_noNorm_SampleProbeProfile.txt",
+              "HJ_JingWen_7chip__011113_NouRNA_NoParasite_Bkg_Subtracted_No_Norm_Sample_Probe_Profile.txt")
+
+x.lumi <- lumiR.batch(fileList = fileList, lib.mapping = 'lumiMouseIDMapping', convertNuID = F)
+pData <- read.csv("SampleInfo_GEO.csv", row.names = 1)
+
+x.lumi.GEO <- x.lumi[,match(pData$"slot", x.lumi$sampleID)]
+
+sampleNames(x.lumi.GEO) <- rownames(pData[match(x.lumi.GEO$sampleID,
+                                                pData[,"slot"]),])
+pData(x.lumi.GEO) <- pData
+
+x.lumi.GEO.AS <- x.lumi.GEO[,x.lumi.GEO$type == "AS"]
+
+x.lumi.GEO.AS.blood <- x.lumi.GEO.AS[,x.lumi.GEO.AS$tissue == "blood"]
+
+x.lumi.GEO.AS.spleen <- x.lumi.GEO.AS[,x.lumi.GEO.AS$tissue == "spleen"]
+
+x.lumi.GEO.CB <- x.lumi.GEO[,x.lumi.GEO$type == "CB"]
+
+x.lumi.GEO.CB.blood <- x.lumi.GEO.CB[,x.lumi.GEO.CB$tissue == "blood"]
+
+x.lumi.GEO.CB.spleen <- x.lumi.GEO.CB[,x.lumi.GEO.CB$tissue == "spleen"]
+
+TNQ.AS.blood <- subTNQ(x.lumi.GEO.AS.blood)
+
+TNQ.AS.spleen <- subTNQ(x.lumi.GEO.AS.spleen)
+
+TNQ.CB.blood <- subTNQ(x.lumi.GEO.CB.blood)
+
+TNQ.CB.spleen <- subTNQ(x.lumi.GEO.CB.spleen)
+```
+
+```{r}
+
+IntBoxplot(TNQ.AS.blood, tissue = "blood", strain = "AS", printPDF = T)
+
+IntBoxplot(TNQ.AS.spleen, tissue = "spleen", strain = "AS", printPDF = T)
+
+IntBoxplot(TNQ.CB.blood, tissue = "blood", strain = "CB", printPDF = T)
+
+IntBoxplot(TNQ.CB.spleen, tissue = "spleen", strain = "CB", printPDF = T)
+
+customPCA(TNQ.AS.blood, tissue = "blood", strain = "AS", printPDF = T)
+
+customPCA(TNQ.AS.spleen, tissue = "spleen", strain = "AS", printPDF = T)
+
+customPCA(TNQ.CB.blood, tissue = "blood", strain = "CB", printPDF = T)
+
+customPCA(TNQ.CB.spleen, tissue = "spleen", strain = "CB", printPDF = T)
+
+customHeatmap(TNQ.AS.blood, tissue = "blood", strain = "AS", printPDF = T)
+
+customHeatmap(TNQ.AS.spleen, tissue = "spleen", strain = "AS", printPDF = T)
+
+customHeatmap(TNQ.CB.blood, tissue = "blood", strain = "CB", printPDF = T)
+
+customHeatmap(TNQ.CB.spleen, tissue = "spleen", strain = "CB", printPDF = F)
+
+```
+
+
+```{r}
+
+# Varification of Parasites not Affecting Experiment
+
+fileList <- c("HJ_CG_JeanLangh_JW_220813_Sample_Probe_Profile.txt")
+x.lumi <- lumiR.batch(fileList = fileList, lib.mapping = 'lumiMouseIDMapping', convertNuID = T)
+pData <- read.csv("SampleInfo.csv", row.names = 1)
+
+sampleNames(x.lumi) <- rownames(pData[match(x.lumi$sampleID, rownames(pData)),])
+pData(x.lumi) <- pData[match(x.lumi$sampleID, rownames(pData)),]
+
+# Remove bad samples
+badsamp <- c("8697771087_E","8697771096_F")
+toremove <- rownames(pData(x.lumi)) %in% badsamp
+x.lumi.badremove = x.lumi[,-which(toremove)]
+
+pdf(file = "fig/Parasite_True_detection.pdf")
+True_Detection <- as.data.frame(colSums(detection(x.lumi.badremove) <= 0.01 ))
+
+p <- True_Detection %>%
+  mutate(slot_name = factor(rownames(True_Detection), c("8697771087_A", "8697771087_D", "8697771096_B", "8697771087_B",
+                            "8697771087_C", "8697771087_F", "8697771096_A", "8697771096_D", "8697771096_C","8697771096_E"))) %>%
+  ggplot( aes(x = slot_name,
+              y = True_Detection[,1], group = 1,
+              label = True_Detection[,1])) +
+  geom_bar(stat = "identity") +
+  geom_text(vjust = -1, nudge_y = 0.5) +
+  ggtitle("True Detection") +
+  xlab("Samples") +
+  ylab("Detected Probes") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.title.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(size = 12), 
+        aspect.ratio=1) +
+  scale_x_discrete(labels = c("naïve blood rep1", "naïve blood rep2", "naïve blood rep3", "Infected D8 rep1",
+                              "Infected D8 rep2", "Infected D8 rep3", "Infected D8 rep4", "Infected D8 rep5",
+                              "Parasite RNA rep1", "Parasite RNA rep2"))
+print(p)
+dev.off()
+
+###Generate QC plots
+
+pdf(file = "fig/density_plot.pdf")
+plot(x.lumi.badremove, what = "density")
+dev.off()
+
+pdf(file = "fig/Cumulative_plot_of_density.pdf")
+plotCDF(x.lumi.badremove, reverse = T)
+dev.off()
+
+# Density plot using ggplot2
+
+expr <- exprs(x.lumi.sub.T)
+if (max(expr, na.rm = TRUE) > 50) {
+  if (min(expr, na.rm = TRUE) < 0) {
+    rMin <- rowMin(expr)
+    expr <- expr[rMin > 0, , drop = FALSE]
+    }
+  expr <- log2(expr)
+}
+expr <- expr %>% t %>% data.frame(Sample.Name = sampleNames(x.lumi.sub.T),
+                                                                      infection = x.lumi.sub.T$infection,
+                                                                      parasite = x.lumi.sub.T$parasite)
+expr.melt <- melt(expr, id = c("Sample.Name", "infection", "parasite"))
+colnames(expr.melt)[4:5] <- c("Symbol", "Intensity")
+
+# pdf(file = "fig/Histogram_of_Expression_density.pdf")
+ggplot(expr.melt, aes(Intensity, group = Sample.Name, col = parasite)) +
+  stat_density(position="identity",geom="line",linetype = 1) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  ggtitle("Histogram of Expression") + ylab("Density") + xlab("Expression")
+# dev.off()
+
+
+pdf(file = "fig/density_with_parasites.pdf")
+plot(x.lumi.badremove, what = "density")
+dev.off()
+
+# plot(x.lumi.badremove, what = 'pair')
+# pairs(x.lumi.badremove, smoothScatter = T)
+# MAplot(x.lumi.badremove, smoothScatter = T)
+plot(x.lumi.badremove, what = 'boxplot')
+plot(x.lumi.badremove, what = 'sampleRelation')
+plotSampleRelation(x.lumi.badremove, method = 'mds')
+plotSampleRelation(x.lumi.badremove, method = 'cluster')
+
+##Do default VST variance stabilizing transform
+
+# x.lumi.sub.B <- lumiB(x.lumi.sub, method = 'forcePositive')
+
+x.lumi.noparasite <- x.lumi.badremove[,x.lumi.badremove$parasite == 'No']
+
+x.lumi.sub.T <- lumiT(x.lumi.noparasite, method = 'log2')
+
+##Plot VST transformation
+
+trans <- plotVST(x.lumi.sub.T)
+matplot(log2(trans$untransformed), trans$transformed)
+
+##Do quantile between microarray normaliazation
+x.lumi.sub.TN <- lumiN(x.lumi.sub.T)
+
+##Do quality control estimation after normalization
+x.lumi.sub.TNQ <- lumiQ(x.lumi.sub.TN)
+
+
+###Generate QC plots after normalisation
+plotCDF(x.lumi.sub.TNQ, reverse = T)
+plotSampleRelation(x.lumi.sub.TNQ, method = 'mds')
+plotSampleRelation(x.lumi.sub.TNQ, method = 'cluster')
+
+# The PCA plot of the vst-transformed raw expression data
+exp_raw <- exprs(x.lumi.sub.TNQ)
+PCA_raw <- prcomp(t(exp_raw), scale. = FALSE)
+
+percentVar <- round(100*PCA_raw$sdev^2/sum(PCA_raw$sdev^2),1)
+sd_ratio <- sqrt(percentVar[2] / percentVar[1])
+
+dataGG <- data.frame(PC1 = PCA_raw$x[,1], PC2 = PCA_raw$x[,2],
+                    infection = pData(x.lumi.sub.TNQ)$"infection")
+
+pdf(file = "fig/PCA_of_infected_vs._naïve.pdf")
+ggplot(dataGG, aes(PC1, PC2)) +
+      geom_point(aes(shape = infection), size = 3, col = "royalblue") +
+      theme_bw() +
+      theme(panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank()) +
+      ggtitle("PCA plot of infected vs. naïve expression data") +
+      xlab(paste0("PC1, VarExp: ", percentVar[1], "%")) +
+      ylab(paste0("PC2, VarExp: ", percentVar[2], "%")) +
+      theme(plot.title = element_text(hjust = 0.5), aspect.ratio=1)+
+      coord_fixed(ratio = sd_ratio) +
+      scale_shape_manual(values = c(17,15,16))
+dev.off()
+
+
+probeList <- rownames(x.lumi.badremove[detection(x.lumi.badremove[,"8697771096_C"]) <= 0.01,])
+geneSymbol <- sapply(probeList %>% lookUp('lumiMouseAll.db', what = "SYMBOL"), function(x) x[1])
+
+gene.df <- bitr(geneSymbol, fromType = "SYMBOL",
+        toType = c("ENTREZID"),
+        OrgDb = org.Mm.eg.db )
+head(gene.df)
+
+# ggo <- groupGO(gene     = gene.df[,"ENTREZID"],
+#                OrgDb    = org.Mm.eg.db,
+#                ont      = "CC",
+#                level    = 3,
+#                readable = TRUE)
+# 
+# head(ggo)
+
+ego <- enrichGO(gene          = gene.df[,"ENTREZID"],
+                OrgDb         = org.Mm.eg.db,
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05,
+        readable      = TRUE)
+
+
+head(ego)
+pdf( file = "fig/GO_for_8697771096_C_true_detection.pdf" )
+dotplot(ego)
+dev.off()
+
+```
+
