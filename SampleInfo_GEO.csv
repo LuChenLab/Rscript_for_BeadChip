@@ -1,4 +1,4 @@
-SampleID,type,tissue,infection,day,geo_accession,description,slot,platform_id,concat_name
+﻿SampleID,type,tissue,infection,day,geo_accession,description,slot,platform_id,concat_name
 GSM2459164,AS,blood,naïve,D0,GSM2459164,replicate 1,8762536135_E,GPL6887,AS_Bl_N0.1
 GSM2459165,AS,blood,naïve,D0,GSM2459165,replicate 2,8762536084_A,GPL6887,AS_Bl_N0.2
 GSM2459166,AS,blood,naïve,D0,GSM2459166,replicate 3,8762536052_F,GPL6887,AS_Bl_N0.3
